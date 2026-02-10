@@ -1,0 +1,570 @@
+---
+title: "Project1"
+output: html_document
+date: "2026-02-08"
+---
+
+```{r}
+# Bias in Major US Cities
+```
+
+
+```{r}
+#Install required packages
+
+#Importing Data
+#install.packages("jsonlite")
+library(jsonlite)
+
+#Cleaning Data
+#install.packages("janitor")
+library(janitor)
+
+#Cleaning and Visualization
+#install.packages("tidyverse")
+library(tidyverse)
+
+#Cleaning and Visualization
+#install.packages("tidytext")
+library(tidytext)
+
+#Word Cloud Visualization
+#install.packages("ggwordcloud")
+library(ggwordcloud)
+```
+
+
+```{r}
+#create file connections
+c1 <- file("yelp_academic_dataset_business.json")
+c2 <- file("yelp_academic_dataset_review.json")
+
+```
+```{r}
+#Reading data
+biz_data <- stream_in(c1)
+rev_data <- stream_in(c2)
+```
+
+```{r}
+#Exploring data
+
+str(biz_data)
+
+str(rev_data)
+
+head(biz_data)
+
+head(rev_data)
+```
+```{r}
+#Cleaning 1: Unnesting and Renaming
+
+##function to unnest and clean
+process_biz_data <- function(df) {
+  df %>%
+    ###Unnest data
+    unnest(cols = any_of("attributes"), names_sep = "_") %>%
+    
+    ###Clean names
+    clean_names() %>%
+    
+    ###Remove "attributes_" prefix from all column names
+    rename_with(~ str_remove(., "^attributes_")) %>%
+    
+    ###Select cols
+    select(
+      city,
+      state,
+      business_id,
+      postal_code,
+      stars,
+      wheelchair_accessible,
+      restaurants_attire,
+      accepts_insurance,
+      corkage
+    )
+}
+
+## Apply to data
+biz_data_clean <- process_biz_data(biz_data)
+
+## Review Data
+
+rev_data_clean <- rev_data %>% 
+  
+  ###Clean names
+  clean_names() %>%
+  
+  ###Select cols
+  select(
+    business_id,
+    review_id,
+    stars,
+    text,
+    date
+  )
+
+```
+
+```{r}
+#Cleaning 2: Selecting Cities and States of Interest
+
+biz_data_clean <- biz_data_clean %>%
+  mutate(across(
+    .cols = !business_id,
+    .fns = ~ if(is.character(.)) tolower(.) else .))
+
+##Changing data class
+
+head(as.character(biz_data_clean$postal_code))
+
+##Philadelphia PA
+phildf <- filter(biz_data_clean, city == "philadelphia")
+
+PAdf <- filter(biz_data_clean, state == "pa")
+
+##Saint Louis MO
+names_stl <- c("saint louis", "st louis", "st. louis")
+stldf <- filter(biz_data_clean, city %in% names_stl)
+
+MOdf <- filter(biz_data_clean, state == "mo")
+
+##Tuscon AZ
+names_tusc <- c("tuscon", "tucson")
+tuscdf <- filter(biz_data_clean, city %in% names_tusc)
+
+AZdf <- filter(biz_data_clean, state == "az")
+
+##Tampa FL
+tampadf <- filter(biz_data_clean, city == "tampa", state == "fl")
+
+FLdf <- filter(biz_data_clean, state == "fl")
+
+```
+
+
+```{r}
+#Cleaning 3: Samples from Each State
+
+set.seed(42)
+
+## PA
+PAzips <- sample(unique(PAdf$postal_code), 5)
+
+## MO
+MOzips <- sample(unique(MOdf$postal_code), 5)
+
+## AZ
+AZzips <- sample(unique(AZdf$postal_code), 5)
+
+## FL
+FLzips <- sample(unique(FLdf$postal_code), 5)
+```
+
+```{r}
+#Cleaning 4: Cleaning responses to attributes
+
+##Geographic list
+geo_list <- list(
+  phil = phildf, 
+  stl  = stldf, 
+  tamp = tampadf, 
+  tusc = tuscdf,
+  PA = PAdf,
+  MO = MOdf,
+  FL = FLdf,
+  AZ = AZdf
+)
+
+clean_responses <- function(x) {
+  val <- as.character(x) 
+  
+  dplyr::case_when(
+    val %in% c("true", "t", "yes") ~ "yes",
+    val %in% c("false", "f", "no", "none") ~ "no",
+    is.na(val) | val == "na" | val == "unknown" ~ "not reported",
+    TRUE ~ "no" 
+  )
+}
+
+##Cols of interest
+target_cols <- c("accepts_insurance", "corkage", "wheelchair_accessible")
+
+```
+
+
+```{r}
+#Cleaning 5:
+
+##Create a function for attire
+laundry <- function(x) {
+  x_clean <- str_replace_all(tolower(x), "u|'|\"", "")
+  
+  case_when(
+    is.na(x_clean) ~ "unknown",
+    str_detect(x_clean, "casual") ~ "casual",
+    str_detect(x_clean, "dressy") ~ "dressy",
+    str_detect(x_clean, "formal") ~ "formal",
+    TRUE ~ "unknown"
+  ) %>%
+    factor(levels = c("casual", "dressy", "formal", "unknown"))
+}
+
+##Apply function
+geo_list <- purrr::map(geo_list, function(df) {
+  df %>% 
+    mutate(
+      across(any_of(target_cols), clean_responses),
+      restaurants_attire = laundry(restaurants_attire)
+    )
+})
+
+# Separate Data Frames 
+list2env(geo_list, envir = .GlobalEnv)
+
+```
+
+
+```{r}
+# Bohren , Hull , and Imas (2025) recommend a measure of direct, total, and systemic discrimination in order to estimate the total impact of discrimination in a given setting in a more comprehensive and standardized way.
+
+#https://academic.oup.com/qje/article/140/3/1743/8123617#525198762
+
+#Therefore, for this analysis these definitions were created:
+
+##Direct - Identified by exclusionary attributes such as wheelchair accessibility and through a lexical analysis of business reviews. For the purpose of this lexical analysis a higher score indicates a higher proportion of reviews containing at least 1 term from the bias dictionary. The bias dictionary was created for this analysis based on words adapted from: https://www.racialequitytools.org/glossary and https://www.sonomacountybar.org/?pg=glossary-dei-terms
+
+##Systematic - Identified a sample of exclusionary characteristics that indirectly can impart bias on a business' customers. The sampled attributes include whether a company accepts insurance, charges corkage fees, or requires a specific attire. Additional attributes that were not included due to a lack of sufficient data but could be considered in future analysis include items such as age restrictions, the hours that a business is open, ambiance scores (for bias coded language), proportion of salons specializing in hair types vs census ethnicity data, and more. 
+
+##Total - An aggregate score of the above factors, utilized for comparison. ***
+```
+
+```{r}
+#Data Analysis 1:
+
+##Proportions of Exclusionary Attributes
+calc_proportions <- function(df, loc_name) {
+  df %>%
+    summarise(
+      Location = loc_name,
+      `Does Not Take Insurance` = sum(accepts_insurance == "no", na.rm = TRUE) / n(),
+      `Dress Code Required` = sum(restaurants_attire %in% c("dressy", "formal"), na.rm = TRUE) / n(),
+      `Corkage Fee` = sum(corkage == "yes", na.rm = TRUE) / n()
+    ) %>%
+    pivot_longer(cols = -Location, names_to = "Barrier_Type", values_to = "Proportion")
+}
+
+## Apply to Data
+plot_data <- bind_rows(
+  calc_proportions(phil, "Philadelphia"),
+  calc_proportions(stl, "St. Louis"),
+  calc_proportions(tamp, "Tampa"),
+  calc_proportions(tusc, "Tucson"),
+  calc_proportions(PA, "PA (State)"),
+  calc_proportions(MO, "MO (State)"),
+  calc_proportions(FL, "FL (State)"),
+  calc_proportions(AZ, "AZ (State)")
+)
+```
+
+```{r}
+#Data analysis 1 cont:
+
+## Change order of states
+state_order <- c("MO", "FL", "PA", "AZ")
+
+## Change order of cities
+manual_location_order <- c(
+  "MO (State)", "St. Louis", 
+  "FL (State)", "Tampa", 
+  "PA (State)", "Philadelphia", 
+  "AZ (State)", "Tucson"
+)
+
+plot_data_labeled <- plot_data %>%
+  mutate(
+    State = case_when(
+      str_detect(Location, "PA|Philadelphia") ~ "PA",
+      str_detect(Location, "MO|St. Louis") ~ "MO",
+      str_detect(Location, "FL|Tampa") ~ "FL",
+      str_detect(Location, "AZ|Tucson") ~ "AZ",
+      TRUE ~ "Other"
+    ),
+    ## change class for easier sorting
+    State = factor(State, levels = state_order),
+    Location = factor(Location, levels = manual_location_order)
+  ) %>%
+  filter(!is.na(State))
+
+```
+
+
+```{r}
+#Visualize 1: Indirect Bias
+
+ggplot(plot_data_labeled, aes(x = Location, y = Proportion, fill = Barrier_Type)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = ifelse(Proportion > 0.005, scales::percent(Proportion, accuracy = 0.1), "")),
+            position = position_stack(vjust = 0.5), 
+            size = 3, 
+            color = "white", 
+            fontface = "bold") +
+  facet_wrap(~State, scales = "free_x", nrow = 1, drop = TRUE) + 
+  theme_minimal() +
+  scale_fill_brewer(palette = "Set2") +
+  scale_y_continuous(labels = scales::percent) + 
+  labs(
+    title = "Systemic Barriers to Accessibility in Consumer Businesses",
+    subtitle = "State and Major City Averages",
+    x = "Location",
+    y = "Proportion of Businesses",
+    fill = "Barrier Type"
+  ) +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    legend.position = "bottom"
+  )
+
+
+```
+
+```{r}
+#Data Analysis 2: Wheelchair Accessibility
+
+# Visualize data: Wheelchair Accessibility
+
+## Calculate proportions
+wca_viz_data <- map_df(geo_list, ~{
+  .x %>%
+    count(wheelchair_accessible) %>%
+    mutate(prop = n / sum(n))
+}, .id = "Location_Raw") %>%
+  ##change names 
+  mutate(Location = case_when(
+    Location_Raw == "phil" ~ "Philadelphia",
+    Location_Raw == "stl"  ~ "St. Louis",
+    Location_Raw == "tamp" ~ "Tampa",
+    Location_Raw == "tusc" ~ "Tucson",
+    Location_Raw == "PA"   ~ "PA (State)",
+    Location_Raw == "MO"   ~ "MO (State)",
+    Location_Raw == "FL"   ~ "FL (State)",
+    Location_Raw == "AZ"   ~ "AZ (State)",
+    TRUE ~ Location_Raw
+  )) %>%
+  ##organize city/state
+  mutate(State = case_when(
+    str_detect(Location, "PA|Philadelphia") ~ "PA",
+    str_detect(Location, "MO|St. Louis") ~ "MO",
+    str_detect(Location, "FL|Tampa") ~ "FL",
+    str_detect(Location, "AZ|Tucson") ~ "AZ"
+  )) %>%
+  ##Order to match previous graph
+  mutate(Location = factor(Location, levels = manual_location_order),
+         State = factor(State, levels = state_order))
+
+##Stacking order
+wca_viz_data <- wca_viz_data %>%
+  mutate(wheelchair_accessible = factor(wheelchair_accessible, 
+                                        levels = c("yes", "no", "unknown", "not reported")))
+
+##Plot
+ggplot(wca_viz_data, aes(x = Location, y = prop, fill = wheelchair_accessible)) +
+  geom_col(position = "stack", color = "white") +
+  geom_text(aes(label = ifelse(prop > 0.05 & wheelchair_accessible != "unknown", 
+                               scales::percent(prop, accuracy = 1), "")),
+            position = position_stack(vjust = 0.5), size = 3, color = "white", fontface = "bold") +
+  facet_wrap(~State, scales = "free_x", nrow = 1) +
+  scale_y_continuous(labels = scales::percent) +
+  scale_fill_manual(values = c("yes" = "#7BA05B", "no" = "#CD7F32", "unknown" = "#9EB9D4", "not reported" = "#9EB9D4")) +
+  theme_minimal() +
+  labs(
+    title = "Wheelchair Accessibility Proportions by Location",
+    subtitle = "Are Businesses Accessible?",
+    x = NULL, y = "Percentage of Businesses", fill = "Accessible?"
+  ) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+```{r}
+#Data Analysis 2: Direct bias in language a lexical analysis
+
+## Bias Dictionary
+bwords <- tibble::tibble(
+  word = c("ghetto", "sketchy", "childish", 
+           "scary", "rough", "hipsters", "racial", "racism", 
+           "racist", "abelist", "heteronormative", "heterosexism", 
+           "islamophobic", "xenophobic", "abusive", "predjudice", 
+           "predjudiced", "agist", "discriminate", "discrimination", 
+           "discriminated", "homophobic", "harassment")
+)
+
+## Function to generate a word cloud for a specific geographic subset
+create_city_cloud <- function(city_df, reviews_df, title_label) {
+  
+  #Count bias words
+  word_counts <- reviews_df %>%
+    semi_join(city_df, by = "business_id") %>%
+    unnest_tokens(word, text) %>%
+    inner_join(bwords, by = "word") %>%
+    count(word)
+  
+  #Plot data
+  ggplot(word_counts, aes(label = word, size = n, color = word)) +
+    geom_text_wordcloud_area(rm_outside = TRUE) +
+    scale_size_area(max_size = 40) + 
+    theme_minimal() +
+    scale_color_viridis_d(option = "plasma") +
+    labs(
+      title = paste("Bias Language Frequency:", title_label),
+    ) +
+    theme(plot.title = element_text(size = 16, face = "bold", hjust = 0.5))
+}
+```
+
+```{r}
+# Clear memory before starting
+gc()
+
+# Generate Tampa Cloud
+tampa_cloud <- create_city_cloud(tampadf, rev_data_clean, "Tampa, FL")
+print(tampa_cloud)
+
+# Clear memory again
+gc()
+
+# Generate Florida State Cloud
+florida_cloud <- create_city_cloud(FLdf, rev_data_clean, "Florida")
+print(florida_cloud)
+```
+
+```{r}
+#PA
+
+# Clear memory before starting
+gc()
+
+# Generate Philly Cloud
+phil_cloud <- create_city_cloud(phildf, rev_data_clean, "Philadelphia, PA")
+print(phil_cloud)
+
+# Clear memory again
+gc()
+
+# Generate Pennsylvania State Cloud
+pennsylvania_cloud <- create_city_cloud(PAdf, rev_data_clean, "Pennsylvania")
+print(pennsylvania_cloud)
+```
+
+
+
+```{r}
+#MO
+
+# Clear memory before starting
+gc()
+
+# Generate St. Louis Cloud
+stl_cloud <- create_city_cloud(stldf, rev_data_clean, "St. Louis, MO")
+print(stl_cloud)
+
+# Clear memory again
+gc()
+
+# Generate Missouri State Cloud
+missouri_cloud <- create_city_cloud(MOdf, rev_data_clean, "Missouri")
+print(missouri_cloud)
+```
+
+```{r}
+#AZ
+
+# Clear memory before starting
+gc()
+
+# Generate Tuscon Cloud
+tusc_cloud <- create_city_cloud(tuscdf, rev_data_clean, "Tuscon, AZ")
+print(tusc_cloud)
+
+# Clear memory again
+gc()
+
+# Generate Arizona State Cloud
+arizona_cloud <- create_city_cloud(AZdf, rev_data_clean, "Arizona")
+print(arizona_cloud)
+```
+
+```{r}
+#Compare to randomly sampled zipcodes in Missouri
+# 1. Create a dataframe containing only the businesses in those 5 zips
+MO_sample_df <- MOdf %>%
+  filter(postal_code %in% MOzips)
+
+# 2. Clear memory 
+gc()
+
+# 3. Generate the Cloud using the new dataframe
+MO_zips_cloud <- create_city_cloud(MO_sample_df, rev_data_clean, "Sample of Zip Codes in MO")
+
+# 4. Print
+print(MO_zips_cloud)
+
+```
+
+```{r}
+#Compare to randomly sampled zipcodes in Pennsylvania
+# 1. Create a dataframe containing only the businesses in those 5 zips
+PA_sample_df <- PAdf %>%
+  filter(postal_code %in% PAzips)
+
+# 2. Clear memory 
+gc()
+
+# 3. Generate the Cloud using the new dataframe
+PA_zips_cloud <- create_city_cloud(PA_sample_df, rev_data_clean, "Sample of Zipcodes in PA")
+
+# 4. Print
+print(PA_zips_cloud)
+```
+```{r}
+#Compare to randomly sampled zipcodes in Florida
+# 1. Create a dataframe containing only the businesses in those 5 zips
+FL_sample_df <- FLdf %>%
+  filter(postal_code %in% FLzips)
+
+# 2. Clear memory 
+gc()
+
+# 3. Generate the Cloud using the new dataframe
+FL_zips_cloud <- create_city_cloud(FL_sample_df, rev_data_clean, "Sample of Zipcodes in FL")
+
+# 4. Print
+print(FL_zips_cloud)
+```
+
+```{r}
+#Compare to randomly sampled zipcodes in Arizona
+# 1. Create a dataframe containing only the businesses in those 5 zips
+AZ_sample_df <- AZdf %>%
+  filter(postal_code %in% AZzips)
+
+# 2. Clear memory 
+gc()
+
+# 3. Generate the Cloud using the new dataframe
+AZ_zips_cloud <- create_city_cloud(AZ_sample_df, rev_data_clean, "Sample of Zipcodes in AZ")
+
+# 4. Print
+print(AZ_zips_cloud)
+```
+
+
+
+
+
+
+
+
+
+
